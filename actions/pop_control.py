@@ -161,3 +161,65 @@ def pop_control(
     if completed.returncode != 0:
         return _bounded(f"PoP {action} failed: {output or 'unknown script error'}")
     return _bounded(output or f"PoP {action} completed.")
+
+
+# ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
+TOOL = {
+    "name": "pop_control",
+    "description": (
+        "Runs allowlisted Project-of-Projects status, validation, task, or move "
+        "operations through the canonical scripts. Never invents free-form shell commands."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {
+                "type": "STRING",
+                "description": "status | validate | task | move",
+            },
+            "project": {
+                "type": "STRING",
+                "description": "PoP category/project",
+            },
+            "task_id": {
+                "type": "STRING",
+                "description": "PoP task identifier",
+            },
+            "title": {
+                "type": "STRING",
+                "description": "Task title",
+            },
+            "stage": {
+                "type": "STRING",
+                "description": "Canonical numbered PoP stage",
+            },
+            "reason": {
+                "type": "STRING",
+                "description": "Move reason",
+            },
+            "context": {
+                "type": "ARRAY",
+                "items": {"type": "STRING"},
+                "description": "Move context entries",
+            },
+            "test_seconds": {
+                "type": "NUMBER",
+                "description": "Verified test duration",
+            },
+            "by": {
+                "type": "STRING",
+                "description": "Actor for a move",
+            },
+            "force": {
+                "type": "BOOLEAN",
+                "description": "Explicitly force a PoP move",
+            },
+            "standalone": {
+                "type": "BOOLEAN",
+                "description": "Run standalone validation",
+            },
+        },
+        "required": ["action"],
+    },
+    "handler": pop_control,
+}
