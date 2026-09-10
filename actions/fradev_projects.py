@@ -97,3 +97,28 @@ def fradev_projects(
     if completed.returncode != 0:
         return _bounded(f"Local git status failed: {output or 'unknown git error'}")
     return _bounded(output or "Working tree clean.")
+
+
+# ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
+TOOL = {
+    "name": "fradev_projects",
+    "description": (
+        "Lists authorized FraDev projects or shows safe local Git status for one "
+        "authorized project path. Never invents projects outside the configured allowlist."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {
+                "type": "STRING",
+                "description": "list | status",
+            },
+            "project_path": {
+                "type": "STRING",
+                "description": "Authorized project path for status",
+            },
+        },
+        "required": ["action"],
+    },
+    "handler": fradev_projects,
+}

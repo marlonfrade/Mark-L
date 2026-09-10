@@ -1,5 +1,4 @@
 import json
-import re
 import subprocess
 import tempfile
 import unittest
@@ -299,19 +298,35 @@ class FraDevToolingTests(unittest.TestCase):
         self.assertIn("unsafe", result.lower())
         self.assertFalse((self.root / "escape.py").exists())
 
-    def test_main_declares_imports_and_routes_all_fradev_tools(self):
-        source = (Path(__file__).resolve().parents[1] / "main.py").read_text(
-            encoding="utf-8"
+    def test_action_loader_discovers_all_fradev_tools(self):
+        from core.action_loader import discover_actions
+
+        root = Path(__file__).resolve().parents[1]
+        registry = discover_actions(
+            actions_dir=root / "actions",
+            reserved_names=set(),
+            logger=lambda _msg: None,
         )
+        declarations = {
+            item["name"]: item for item in registry.get_tool_declarations()
+        }
 
         for tool in ("fradev_projects", "pop_control", "git_control"):
-            self.assertIn(f'"name": "{tool}"', source)
-            self.assertIn(f'elif name == "{tool}"', source)
-            self.assertRegex(
-                source,
-                rf"from actions\.{re.escape(tool)}\s+import {re.escape(tool)}",
-            )
-        self.assertIn('"project_path"', source)
+            self.assertIn(tool, declarations)
+            self.assertTrue(registry.has(tool))
+
+        self.assertIn(
+            "project_path",
+            declarations["fradev_projects"]["parameters"]["properties"],
+        )
+        self.assertIn(
+            "project_path",
+            declarations["git_control"]["parameters"]["properties"],
+        )
+        self.assertIn(
+            "project_path",
+            declarations["dev_agent"]["parameters"]["properties"],
+        )
 
 
 if __name__ == "__main__":

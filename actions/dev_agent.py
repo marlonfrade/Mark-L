@@ -659,6 +659,10 @@ TOOL = {
                 "type": "STRING",
                 "description": "Optional project folder name"
             },
+            "project_path": {
+                "type": "STRING",
+                "description": "Exact authorized existing project directory"
+            },
             "timeout": {
                 "type": "INTEGER",
                 "description": "Run timeout in seconds (default: 30)"

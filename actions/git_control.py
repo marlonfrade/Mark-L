@@ -111,3 +111,32 @@ def git_control(
     if output:
         return _bounded(output)
     return "Working tree clean." if action == "status" else f"Local git {action} completed."
+
+
+# ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
+TOOL = {
+    "name": "git_control",
+    "description": (
+        "Runs authorized local-only Git status, diff, or commit. "
+        "Never push, open PRs, merge, fetch, pull, checkout, reset, stash, or rebase."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {
+                "type": "STRING",
+                "description": "status | diff | commit",
+            },
+            "project_path": {
+                "type": "STRING",
+                "description": "Authorized local repository path",
+            },
+            "message": {
+                "type": "STRING",
+                "description": "Required explicit commit message",
+            },
+        },
+        "required": ["action", "project_path"],
+    },
+    "handler": git_control,
+}
