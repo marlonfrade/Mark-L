@@ -5,6 +5,8 @@ import re
 import time
 from pathlib import Path
 
+from core.access_policy import AccessPolicy
+
 
 def get_base_dir():
     if getattr(sys, "frozen", False):
@@ -40,6 +42,19 @@ def _strip_fences(text: str) -> str:
     text = re.sub(r"^```[a-zA-Z]*\r?\n?", "", text)
     text = re.sub(r"\r?\n?```\s*$", "", text)
     return text.strip()
+
+
+def _resolve_project_file(project_dir: Path, relative_path: str) -> Path:
+    raw_path = Path(relative_path)
+    if raw_path.is_absolute():
+        raise ValueError(f"Unsafe generated project path: {relative_path}")
+    root = project_dir.resolve(strict=False)
+    candidate = (root / raw_path).resolve(strict=False)
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"Unsafe generated project path: {relative_path}") from exc
+    return candidate
 
 
 def _is_rate_limit(error: Exception) -> bool:
@@ -222,7 +237,7 @@ Code for {file_path}:"""
         response = model.generate_content(prompt)
         code = _strip_fences(response.text)
 
-        full_path = project_dir / file_path
+        full_path = _resolve_project_file(project_dir, file_path)
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(code, encoding="utf-8")
 
@@ -420,7 +435,7 @@ Fixed code for {fix_path}:"""
             response = model.generate_content(prompt)
             fixed = _strip_fences(response.text)
 
-            full_path = project_dir / fix_path
+            full_path = _resolve_project_file(project_dir, fix_path)
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(fixed, encoding="utf-8")
 
@@ -439,6 +454,7 @@ def _build_project(
     language: str,
     project_name: str,
     timeout: int,
+    project_path: str = "",
     speak=None,
     player=None,
 ) -> str:
@@ -460,15 +476,26 @@ def _build_project(
         if speak: speak(msg)
         return msg
 
-    proj_name    = project_name or plan.get("project_name", "jarvis_project")
-    proj_name    = re.sub(r"[^\w\-]", "_", proj_name)
-    project_dir  = PROJECTS_DIR / proj_name
+    proj_name = project_name or plan.get("project_name", "jarvis_project")
+    proj_name = re.sub(r"[^\w\-]", "_", proj_name)
+    if project_path:
+        project_dir = Path(project_path).expanduser().resolve(strict=False)
+        proj_name = project_dir.name
+    else:
+        project_dir = PROJECTS_DIR / proj_name
     project_dir.mkdir(parents=True, exist_ok=True)
 
     files        = plan.get("files", [])
     entry_point  = plan.get("entry_point", "main.py")
     run_command  = plan.get("run_command", f"python {entry_point}")
     dependencies = plan.get("dependencies", [])
+
+    try:
+        _resolve_project_file(project_dir, entry_point)
+        for file_info in files:
+            _resolve_project_file(project_dir, file_info.get("path", ""))
+    except (AttributeError, TypeError, ValueError) as exc:
+        return str(exc)
 
     log(f"Project: {proj_name} | Files: {len(files)} | Entry: {entry_point}")
 
@@ -582,21 +609,32 @@ def dev_agent(
     player=None,
     session_memory=None,
     speak=None,
+    access_policy=None,
 ) -> str:
     p            = parameters or {}
     description  = p.get("description", "").strip()
     language     = p.get("language", "python").strip()
     project_name = p.get("project_name", "").strip()
+    project_path = p.get("project_path", "").strip()
     timeout      = int(p.get("timeout", 30))
 
     if not description:
         return "Please describe the project you want me to build, sir."
+
+    if project_path:
+        policy = access_policy or AccessPolicy.load()
+        for permission in ("write", "test"):
+            decision = policy.check(project_path, permission)
+            if not decision.allowed:
+                return f"Access denied: {decision.reason}"
+        project_path = str(decision.requested_path)
 
     return _build_project(
         description  = description,
         language     = language,
         project_name = project_name,
         timeout      = timeout,
+        project_path = project_path,
         speak        = speak,
         player       = player,
     )

@@ -5,6 +5,8 @@ from threading import Lock
 from pathlib import Path
 import sys
 
+from memory.fradev_context import DEFAULT_CONFIG_PATH, load_fradev_context
+
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -191,7 +193,10 @@ _IDENTITY_FIELDS = ["name", "age", "birthday", "city", "job",
                     "language", "school", "nationality"]
 
 
-def format_memory_for_prompt(memory: dict | None) -> str:
+def format_memory_for_prompt(
+    memory: dict | None,
+    fradev_config_path: str | Path = DEFAULT_CONFIG_PATH,
+) -> str:
     """Build the memory block that goes into the system prompt.
 
     This used to dump everything. It now sends three things:
@@ -213,8 +218,11 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     every session connects with fewer tokens. Occasionally the model spends one
     extra round trip on recall_memory - covered by the acknowledgment it
     already speaks before any slow step."""
+    fradev_context = load_fradev_context(fradev_config_path)
     if not memory:
-        return ""
+        if not fradev_context:
+            return ""
+        return f"[FRADEV PERSONAL CONTEXT]\n{fradev_context}\n"
 
     core_lines: list[str] = []
 
@@ -295,33 +303,42 @@ def format_memory_for_prompt(memory: dict | None) -> str:
             core_lines.append(f"{label}:")
             core_lines.extend(shown[cat])
 
-    if not core_lines and not indexed:
+    if not core_lines and not indexed and not fradev_context:
         return ""
 
-    out = [
-        "[WHAT YOU KNOW ABOUT THIS PERSON — use naturally, never recite like a list]",
-        *core_lines,
-    ]
+    result = ""
+    if core_lines or indexed:
+        out = [
+            "[WHAT YOU KNOW ABOUT THIS PERSON — use naturally, never recite like a list]",
+            *core_lines,
+        ]
 
-    # 3. The index of what is on disk but not in this prompt
-    if indexed:
-        budget, names = PROMPT_INDEX_CHARS, []
-        for n in indexed:
-            if budget - len(n) - 2 < 0:
-                break
-            names.append(n)
-            budget -= len(n) + 2
-        if names:
-            out.append("")
-            out.append(
-                "[ALSO REMEMBERED — values not shown here. Call recall_memory "
-                "with a keyword to read any of these before saying you do not know]"
-            )
-            out.append(", ".join(names)
-                       + (f" (+{len(indexed) - len(names)} more)"
-                          if len(indexed) > len(names) else ""))
+        # 3. The index of what is on disk but not in this prompt
+        if indexed:
+            budget, names = PROMPT_INDEX_CHARS, []
+            for n in indexed:
+                if budget - len(n) - 2 < 0:
+                    break
+                names.append(n)
+                budget -= len(n) + 2
+            if names:
+                out.append("")
+                out.append(
+                    "[ALSO REMEMBERED — values not shown here. Call recall_memory "
+                    "with a keyword to read any of these before saying you do not know]"
+                )
+                out.append(", ".join(names)
+                           + (f" (+{len(indexed) - len(names)} more)"
+                              if len(indexed) > len(names) else ""))
 
-    return "\n".join(out) + "\n"
+        result = "\n".join(out) + "\n"
+
+    if fradev_context:
+        if result:
+            result += "\n"
+        result += f"[FRADEV PERSONAL CONTEXT]\n{fradev_context}\n"
+
+    return result
 
 
 # ── Recall ────────────────────────────────────────────────────────────────────

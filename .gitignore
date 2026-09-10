@@ -6,6 +6,7 @@
 
 # ── Secrets. Committing any of these publishes them. ──────────────────────────
 config/api_keys.json          # your Gemini API key, plus per-plugin credentials
+config/fradev.local.json      # FraDev local secrets / personal config
 config/certs/                 # the dashboard's TLS private key and certificate
 config/whatsapp_web/          # a LINKED WhatsApp session — committing it hands
                               # somebody your WhatsApp account, not just a key
@@ -14,10 +15,16 @@ config/whatsapp_web/          # a LINKED WhatsApp session — committing it hand
 *credentials*.json
 .env
 .env.*
+*.key
+*.pem
+*.crt
+*.csr
 
 # ── Personal data the assistant accumulates about you ─────────────────────────
 memory/long_term.json
 memory/*.db
+memory/local/
+memory/local_data/
 
 # ── Python build noise ────────────────────────────────────────────────────────
 __pycache__/
@@ -40,6 +47,7 @@ ENV/
 .idea/
 *.swp
 .DS_Store
+**/.DS_Store
 Thumbs.db
 desktop.ini
 
@@ -47,4 +55,5 @@ desktop.ini
 *.log
 logs/
 downloads/
+uploads/
 screenshots/
