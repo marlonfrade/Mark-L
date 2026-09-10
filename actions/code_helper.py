@@ -5,6 +5,8 @@ import re
 import time
 from pathlib import Path
 
+from core.access_policy import AccessPolicy
+
 
 def get_base_dir():
     if getattr(sys, "frozen", False):
@@ -527,7 +529,8 @@ def code_helper(
     response=None,
     player=None,
     session_memory=None,
-    speak=None
+    speak=None,
+    access_policy=None,
 ) -> str:
     """
     Called from main.py.
@@ -555,6 +558,29 @@ def code_helper(
     if action == "auto":
         action = _detect_intent(description, file_path, code)
         print(f"[Code] 🤖 Auto-detected: {action}")
+
+    explicit_paths = []
+    if file_path:
+        explicit_paths.append(Path(file_path).expanduser())
+    if output_path:
+        explicit_paths.append(_resolve_save_path(output_path, language).expanduser())
+
+    required_permissions = {
+        "read": ("read",),
+        "explain": ("read",),
+        "edit": ("write",),
+        "optimize": ("write",),
+        "write": ("write",),
+        "run": ("test",),
+        "build": ("write", "test"),
+    }.get(action, ())
+    if explicit_paths and required_permissions:
+        policy = access_policy or AccessPolicy.load()
+        for path in explicit_paths:
+            for permission in required_permissions:
+                decision = policy.check(path, permission)
+                if not decision.allowed:
+                    return f"Access denied: {decision.reason}"
 
     if action == "write":
         return _write_action(description, language, output_path, player)
