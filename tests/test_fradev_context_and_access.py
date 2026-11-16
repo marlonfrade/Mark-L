@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from core.access_policy import AccessPolicy
@@ -87,6 +88,66 @@ class AccessPolicyTests(unittest.TestCase):
 
         self.assertFalse(decision.allowed)
         self.assertIn("outside configured projects", decision.reason)
+
+    def test_blocked_paths_and_keywords_refuse_tool_parameters(self):
+        blocked = self.root / "work" / "secret-co"
+        blocked.mkdir(parents=True)
+        self.config_path.write_text(
+            json.dumps({
+                "projects": [],
+                "blocked": {"paths": [str(blocked)], "keywords": ["secret"]},
+            }),
+            encoding="utf-8",
+        )
+        policy = AccessPolicy.load(self.config_path)
+
+        self.assertTrue(policy.blocked_reason({"path": str(blocked / "src" / "a.py")}))
+        self.assertTrue(policy.blocked_reason({"folder": "~/elsewhere/secret-api/"}))
+        self.assertTrue(policy.blocked_reason({"files": [{"path": str(blocked)}]}))
+        # keyword anywhere, so a path split across parameters is still caught
+        self.assertTrue(policy.blocked_reason({"path": "~/work", "name": "secret-co"}))
+        self.assertTrue(policy.blocked_reason({"path": f"file://{blocked}/a.py"}))
+        self.assertTrue(policy.blocked_reason({"path": "/x/%73ecret-co/a.py"}))
+        self.assertTrue(policy.blocked_reason({"path": str(blocked).upper()}))
+        self.assertTrue(policy.blocked_reason({"path": str(blocked.parent), "name": "SECRET-CO"}))
+        self.assertEqual(policy.blocked_reason({"query": "public integrations"}), "")
+        self.assertEqual(policy.blocked_reason({"path": str(self.root / "lab")}), "")
+
+    def test_invalid_config_blocks_everything(self):
+        self.config_path.write_text("{not json", encoding="utf-8")
+        policy = AccessPolicy.load(self.config_path)
+
+        self.assertTrue(policy.blocked_reason({"query": "anything"}))
+
+    def test_missing_config_blocks_nothing(self):
+        policy = AccessPolicy.load(self.config_path)
+
+        self.assertEqual(policy.blocked_reason({"path": "/tmp/x"}), "")
+
+    def test_registry_refuses_blocked_parameters(self):
+        from core.action_loader import ActionRecord, ActionRegistry
+
+        blocked = self.root / "secret-co"
+        self.config_path.write_text(
+            json.dumps({"projects": [], "blocked": {"paths": [str(blocked)]}}),
+            encoding="utf-8",
+        )
+        calls = []
+        record = ActionRecord(
+            name="reader",
+            handler=lambda parameters: calls.append(parameters) or "ok",
+            valid=True,
+        )
+        registry = ActionRegistry({"reader": record}, logger=lambda _m: None)
+
+        with unittest.mock.patch(
+            "core.action_loader.AccessPolicy.load",
+            return_value=AccessPolicy.load(self.config_path),
+        ):
+            result = registry.run("reader", {"path": str(blocked / "x.py")})
+
+        self.assertIn("blocked", result.lower())
+        self.assertEqual(calls, [])
 
     def test_permission_denial_has_useful_reason(self):
         project = self.root / "project"

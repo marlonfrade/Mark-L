@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from core.access_policy import AccessPolicy
+
 _NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 _DEFAULT_PARAMS = {"type": "OBJECT", "properties": {}}
 _CTX_KEYS = ("player", "speak", "response", "session_memory")
@@ -158,6 +160,10 @@ class ActionRegistry:
         rec = self._actions.get(name)
         if rec is None or not rec.valid:
             return f"Action '{name}' is not available."
+        blocked = AccessPolicy.load().blocked_reason(parameters)
+        if blocked:
+            self._logger(f"Action '{name}' refused: {blocked}")
+            return blocked
         try:
             return _call_handler(rec.handler, parameters, ctx or {}) or "Done."
         except Exception as e:
