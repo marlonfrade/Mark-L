@@ -77,7 +77,7 @@ class AccessPolicy:
                     for p in blocked.get("paths", [])
                 ),
                 blocked_keywords=tuple(
-                    str(k).lower() for k in blocked.get("keywords", []) if str(k).strip()
+                    _fold(str(k)) for k in blocked.get("keywords", []) if str(k).strip()
                 ),
             )
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
@@ -132,12 +132,13 @@ class AccessPolicy:
         ~/Desktop, under ~)."""
         if "" in self._blocked_keywords:
             return f"Access blocked: {self._config_error}"
-        values = [_normalise(v) for v in _strings(parameters)]
+        # Literal AND decoded forms: decoding may only add matches, never hide one.
+        values = list(dict.fromkeys(f for v in _strings(parameters) for f in _forms(v)))
         # Handlers join folder + name; check every pair joined the same way.
         candidates = values + [f"{a.rstrip('/')}/{b}" for a in values for b in values if a != b]
-        roots = tuple(str(r).casefold() for r in self._blocked_paths)
+        roots = tuple(_fold(str(r)) for r in self._blocked_paths)
         for value in candidates:
-            low = value.casefold()
+            low = _fold(value)
             if any(k in low for k in self._blocked_keywords):
                 return f"Access blocked: '{value}' names a restricted area"
             if roots and _resolves_into(value, roots):
@@ -188,13 +189,18 @@ def _strings(value: Any):
             yield from _strings(item)
 
 
-def _normalise(value: str) -> str:
-    """Decode the forms a handler may decode (file:// URI, %xx, Unicode
-    composition) so the check sees the same text the handler will open."""
-    raw = unicodedata.normalize("NFC", unquote(value.strip().strip("'\"")))
+def _fold(text: str) -> str:
+    return unicodedata.normalize("NFC", text).casefold()
+
+
+def _forms(value: str) -> list[str]:
+    """The literal string plus every way a handler might decode it."""
+    raw = value.strip().strip("'\"")
+    forms = [value, raw, unquote(raw)]
     if raw.casefold().startswith("file:"):
-        raw = unquote(urlparse(raw).path)
-    return raw
+        path = urlparse(raw).path
+        forms += [path, unquote(path)]
+    return [unicodedata.normalize("NFC", f) for f in forms if f]
 
 
 def _resolves_into(value: str, roots: tuple[str, ...]) -> bool:
@@ -204,7 +210,7 @@ def _resolves_into(value: str, roots: tuple[str, ...]) -> bool:
     home = Path.home()
     for cand in (Path(value).expanduser(), home / "Desktop" / value, home / value):
         try:
-            resolved = str(cand.resolve(strict=False)).casefold()
+            resolved = _fold(str(cand.resolve(strict=False)))
         except (OSError, ValueError):
             continue
         if any(resolved == r or resolved.startswith(r.rstrip("/") + "/") for r in roots):
