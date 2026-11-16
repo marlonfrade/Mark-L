@@ -123,24 +123,18 @@ class AccessPolicy:
         """Why these tool parameters touch a blocked area, or ''.
 
         Checked for every tool call, because general tools (file reading,
-        folder jobs) do not consult project grants. A path-like string is
-        blocked when it resolves inside a blocked path or names a blocked
-        keyword; plain text such as a search query is left alone."""
+        folder jobs) do not consult project grants. Any string naming a
+        blocked keyword is refused, so a path split across parameters
+        (folder + name) cannot slip through; a string that resolves inside a
+        blocked path is refused the way handlers resolve it (as given, under
+        ~/Desktop, under ~)."""
         if "" in self._blocked_keywords:
             return f"Access blocked: {self._config_error}"
         for value in _strings(parameters):
-            if "/" not in value and "\\" not in value:
-                continue
-            low = value.lower()
-            hit = next((k for k in self._blocked_keywords if k in low), None)
-            if hit is None:
-                try:
-                    resolved = Path(value.strip()).expanduser().resolve(strict=False)
-                except (OSError, ValueError):
-                    continue
-                if not any(_is_relative_to(resolved, b) for b in self._blocked_paths):
-                    continue
-            return f"Access blocked: {value} is in a restricted area"
+            if any(k in value.lower() for k in self._blocked_keywords):
+                return f"Access blocked: '{value}' names a restricted area"
+            if self._blocked_paths and _resolves_into(value, self._blocked_paths):
+                return f"Access blocked: '{value}' is in a restricted area"
         return ""
 
     def is_allowed(self, path: str | Path, permission: str) -> bool:
@@ -185,6 +179,23 @@ def _strings(value: Any):
     elif isinstance(value, (list, tuple)):
         for item in value:
             yield from _strings(item)
+
+
+def _resolves_into(value: str, roots: tuple[Path, ...]) -> bool:
+    raw = value.strip().strip("'\"")
+    if raw.lower().startswith("file://"):
+        raw = raw[7:]
+    if not raw:
+        return False
+    home = Path.home()
+    for cand in (Path(raw).expanduser(), home / "Desktop" / raw, home / raw):
+        try:
+            resolved = cand.resolve(strict=False)
+        except (OSError, ValueError):
+            continue
+        if any(_is_relative_to(resolved, root) for root in roots):
+            return True
+    return False
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:

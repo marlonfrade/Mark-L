@@ -104,7 +104,10 @@ class AccessPolicyTests(unittest.TestCase):
         self.assertTrue(policy.blocked_reason({"path": str(blocked / "src" / "a.py")}))
         self.assertTrue(policy.blocked_reason({"folder": "~/elsewhere/secret-api/"}))
         self.assertTrue(policy.blocked_reason({"files": [{"path": str(blocked)}]}))
-        self.assertEqual(policy.blocked_reason({"query": "secret integrations"}), "")
+        # keyword anywhere, so a path split across parameters is still caught
+        self.assertTrue(policy.blocked_reason({"path": "~/work", "name": "secret-co"}))
+        self.assertTrue(policy.blocked_reason({"path": f"file://{blocked}/a.py"}))
+        self.assertEqual(policy.blocked_reason({"query": "public integrations"}), "")
         self.assertEqual(policy.blocked_reason({"path": str(self.root / "lab")}), "")
 
     def test_invalid_config_blocks_everything(self):
