@@ -66,10 +66,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 import time
 import threading
 from pathlib import Path
+from typing import Optional
 
 if getattr(sys, "frozen", False):
     _BASE = Path(sys.executable).parent
@@ -111,7 +113,32 @@ SEARCH = "search"  # grounded search — REST only, see below
 #
 #     What it cannot carry is grounding metadata, so grounded web search stays
 #     on REST — see SEARCH.
+#
+#     What it cannot ACCEPT is recorded audio. A Live session takes sound through
+#     realtimeInput, frame by frame, as it is spoken; a finished audio file
+#     handed to it as client content comes back as
+#     "1008 Operation is not implemented, or supported, or enabled". That is a
+#     capability boundary rather than an outage, so it is not something the
+#     cooldown should learn — resting this rung for six hours because one caller
+#     sent a sound file would take the quota-preserving lead rung away from every
+#     text call in the app. `call()` simply does not offer it audio. See
+#     `_carries_recording`.
 LIVE = "live"
+
+# A rung that means "ask a provider from providers/ instead" — a local model, or
+# another vendor's API. The id after the prefix is whatever the settings panel
+# stored, so the cooldown machinery below treats it exactly like a model name
+# and rests it on quota, absence or silence without knowing what it is.
+#
+# WHY THIS IS WORTH HAVING EVEN FOR PEOPLE WHO LIKE GEMINI
+#     Gemini's Live quota and its text quota are separate pools, and on the free
+#     tier it is the TEXT pool that runs out first. When it does, the
+#     conversation carries on while document reading, screen reasoning, code
+#     generation and every other one-shot call in the app stops working. Pointing
+#     only those at a second model — without touching the voice, the latency of
+#     the conversation, or anything the user hears — is the cheapest useful thing
+#     the providers folder does.
+PROVIDER_PREFIX = "prov:"
 
 # Every model this key can reach, in the order to try them. A rung that runs
 # out of quota is skipped for a while and the next one answers — which is the
@@ -127,22 +154,33 @@ LIVE = "live"
 # The three that fail sit at the BOTTOM rather than being deleted: they are
 # real quota when they are healthy, and a rung that is down is set aside by the
 # cooldown after one attempt instead of being paid for on every call.
+#
+# Re-measured for Mark LVII (2026-09-15), same key:
+#     gemini-2.5-flash / -lite   404 "no longer available to new users"
+#     gemini-3.5-flash-lite      0.56s      gemini-flash-lite-latest  0.59s
+#     gemini-3.6-flash           2.52s, then a 504 after 19s
+#     gemini-3.8-flash           6.48s      gemini-flash-latest       5.45s
+#     gemini-3.1-flash-lite      7.51s      gemini-3.7-flash          503
+#     gemini-3.5-flash           504, then 429
+# The 2.5 models moved from the top to the bottom: every launch paid a 404 for
+# each before reaching one that answers. They stay on the ladder because keys
+# created before their retirement can still use them.
 _LADDERS = {
     FAST: (LIVE,
-           "gemini-2.5-flash-lite", "gemini-3.5-flash-lite",
-           "gemini-3.1-flash-lite", "gemini-flash-lite-latest",
-           "gemini-2.5-flash", "gemini-3.5-flash",
-           "gemini-3.6-flash", "gemini-3-flash-preview"),
+           "gemini-3.5-flash-lite", "gemini-flash-lite-latest",
+           "gemini-3.1-flash-lite", "gemini-3.5-flash",
+           "gemini-3.6-flash", "gemini-3.8-flash", "gemini-flash-latest",
+           "gemini-3-flash-preview", "gemini-2.5-flash-lite", "gemini-2.5-flash"),
     SMART: (LIVE,
-            "gemini-2.5-flash", "gemini-3.5-flash",
-            "gemini-2.5-flash-lite", "gemini-3.5-flash-lite",
-            "gemini-3.1-flash-lite",
-            "gemini-3.6-flash", "gemini-3-flash-preview", "gemini-flash-latest"),
+            "gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.6-flash",
+            "gemini-flash-latest", "gemini-3.7-flash",
+            "gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-3.1-flash-lite",
+            "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite"),
     # Grounded search needs response.candidates[...].grounding_metadata, which a
     # Live turn does not produce. REST only, and it says so rather than silently
     # returning an answer with no sources behind it.
-    SEARCH: ("gemini-2.5-flash", "gemini-3.5-flash", "gemini-2.5-flash-lite",
-             "gemini-flash-latest"),
+    SEARCH: ("gemini-3.5-flash", "gemini-flash-latest", "gemini-3.8-flash",
+             "gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"),
 }
 
 # The conversation's own model, and ONE careful fallback behind it.
@@ -224,12 +262,53 @@ _GONE_SECONDS = 6 * 60 * 60
 # but long enough that the fourteen-second wait is paid once, not repeatedly.
 _UNAVAILABLE_SECONDS = 30 * 60
 _cooldown: dict[str, float] = {}
+# The rungs resting because they are not there for this key at all (404, 403) —
+# as opposed to busy. Kept apart so that "every rung is resting" does not put a
+# retired model back in front of a call.
+_gone: set[str] = set()
 _cool_lock = threading.Lock()
 
 
 def _cool(model: str, seconds: float = _COOLDOWN_SECONDS) -> None:
     with _cool_lock:
         _cooldown[model] = time.monotonic() + seconds
+        if seconds >= _GONE_SECONDS:
+            _gone.add(model)
+        else:
+            _gone.discard(model)
+
+
+def usable_rungs(ladder) -> list:
+    """The rungs worth trying now, in ladder order.
+
+    Normally that is every rung not resting. When EVERY rung is resting, this
+    used to answer "try them all again" — so a 404 from a model retired for this
+    key and a fourteen-second 504 were paid again in front of the one call that
+    might have worked. Now the rungs resting for a passing reason (quota,
+    overload) are tried, the soonest back first, and a model that is gone for
+    this key is only retried when nothing else is left: the key may have changed.
+    """
+    ladder = list(ladder)
+    ready = [m for m in ladder if not _cooling(m)]
+    if ready:
+        return ready
+    with _cool_lock:
+        passing = sorted((m for m in ladder if m not in _gone),
+                         key=lambda m: _cooldown.get(m, 0.0))
+    return passing or ladder
+
+
+def is_key_error(err: str) -> bool:
+    """The API key itself was refused.
+
+    Every Gemini rung shares the key, so no rung is to blame and none may be
+    rested. Before this, a refused key read as "permission" → gone, and every
+    model was set aside for six hours — so a key corrected in the settings kept
+    failing until the app was restarted.
+    """
+    low = err.lower()
+    return ("api key not valid" in low or "api_key_invalid" in low
+            or "api key expired" in low or "invalid api key" in low)
 
 
 def is_quota_error(err: str) -> bool:
@@ -292,6 +371,7 @@ def _cooling(model: str) -> bool:
         if until and time.monotonic() < until:
             return True
         _cooldown.pop(model, None)
+        _gone.discard(model)
         return False
 
 
@@ -303,9 +383,15 @@ def api_key(refresh: bool = False) -> str:
             return _cached_key
         try:
             data = json.loads(_KEY_FILE.read_text(encoding="utf-8"))
-            _cached_key = str(data.get("gemini_api_key") or "")
+            new_key = str(data.get("gemini_api_key") or "")
         except Exception:
-            _cached_key = ""
+            new_key = ""
+        if _cached_key is not None and new_key != _cached_key:
+            # What a model answered to the old key says nothing about the new one.
+            with _cool_lock:
+                _cooldown.clear()
+                _gone.clear()
+        _cached_key = new_key
         return _cached_key
 
 
@@ -366,6 +452,53 @@ def _to_live_parts(contents) -> list:
         if isinstance(item, dict):
             parts.append(item)
     return parts
+
+
+def _carries_recording(contents) -> bool:
+    """True when the request holds a sound or video file rather than text or a
+    still image.
+
+    Two rungs of the ladder cannot take one, for reasons that are permanent
+    rather than temporary, so neither should be asked:
+
+      LIVE     answers a recording with 1008 "not implemented, or supported, or
+               enabled" — it wants audio streamed through realtimeInput, not a
+               finished file in a turn. Measured: about 1.5s spent connecting a
+               session that was always going to refuse, paid on EVERY such call,
+               because the message matches none of the cooldown patterns and
+               therefore nothing is ever learned from it.
+
+      prov:    `providers.llm_openai.parts_to_openai` turns every inline_data
+               payload into an `image_url` data URI, which is right for the
+               images this app actually sends and wrong for a sound file. The
+               endpoint would reject it, or — worse — accept it and describe
+               nothing.
+
+    Still images are deliberately NOT included: they are what the vision path
+    sends, both rungs handle them, and excluding them would undo the feature
+    this ladder was built around.
+
+    Costs nothing on the calls that already exist. Every one of them passes a
+    string or a list holding text and at most one image, so this returns on the
+    first isinstance check or after one short loop.
+    """
+    if isinstance(contents, str):
+        return False
+    items = contents if isinstance(contents, (list, tuple)) else [contents]
+    for item in items:
+        if isinstance(item, str):
+            continue
+        mime = None
+        blob = getattr(item, "inline_data", None)
+        if blob is not None:
+            mime = getattr(blob, "mime_type", None)
+        elif isinstance(item, dict):
+            inline = item.get("inline_data") or item.get("inlineData")
+            if isinstance(inline, dict):
+                mime = inline.get("mime_type") or inline.get("mimeType")
+        if isinstance(mime, str) and mime.startswith(("audio/", "video/")):
+            return True
+    return False
 
 
 async def _live_turn(parts: list, system: str, key: str, timeout_s: float) -> str:
@@ -464,8 +597,123 @@ def _live_call(contents, config, timeout_ms: int, key: str):
     return _Reply(text) if text else None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  The provider rung
+# ─────────────────────────────────────────────────────────────────────────────
+# Everything below is inert on an install that has not configured a provider:
+# `_provider_rungs()` reads one key out of the config the app already loads and
+# returns an empty tuple, and the `providers` package is never imported. That is
+# the whole cost of this feature to somebody who does not use it.
+# The settings, cached against the config file's modification time.
+#
+# The first version of this read the config on every call, which is a JSON parse
+# on the hottest path in the module — measured at 143 microseconds per call, paid
+# by every one-shot request in the app whether or not a provider exists. An mtime
+# check is a stat, and it invalidates itself the moment the panel writes, so
+# nothing has to remember to tell this module that a setting changed.
+_prov_cache: tuple[float, str, bool] = (-1.0, "", False)
+_prov_lock = threading.Lock()
+
+
+def _provider_settings() -> tuple[str, bool]:
+    """(provider id or '', try it before Gemini)."""
+    global _prov_cache
+    try:
+        mtime = _KEY_FILE.stat().st_mtime
+    except OSError:
+        return "", False
+
+    with _prov_lock:
+        if _prov_cache[0] == mtime:
+            return _prov_cache[1], _prov_cache[2]
+
+    try:
+        from memory.config_manager import get_sidecar_first, get_sidecar_provider
+        pid, first = get_sidecar_provider(), get_sidecar_first()
+    except Exception:
+        pid, first = "", False
+
+    with _prov_lock:
+        _prov_cache = (mtime, pid, first)
+    return pid, first
+
+
+def _provider_rungs(tier: str) -> tuple[str, ...]:
+    """The configured side-call provider, as a ladder rung — or nothing.
+
+    SEARCH is excluded deliberately. Grounded search needs
+    `candidates[...].grounding_metadata`, which only Google's REST models
+    produce; a provider would return a confident answer with no sources behind
+    it, which is worse than saying it cannot search. The same reasoning already
+    keeps the Live rung off that ladder.
+    """
+    if tier == SEARCH:
+        return ()
+    pid, _ = _provider_settings()
+    return (PROVIDER_PREFIX + pid,) if pid else ()
+
+
+def _provider_first() -> bool:
+    return _provider_settings()[1]
+
+
+def _to_openai_messages(contents, config) -> tuple[list[dict], Optional[float]]:
+    """REST `contents` -> OpenAI `messages`, with the system instruction split
+    out of the config where one was given.
+
+    Deliberately shares `providers.llm_openai.parts_to_openai` rather than
+    re-deriving the image shape here: there is exactly one correct way to turn
+    this app's `inline_data` payloads into a data URI, and two copies of it will
+    not stay the same.
+    """
+    from providers.llm_openai import parts_to_openai
+
+    system = ""
+    temperature = None
+    if config is not None:
+        si = getattr(config, "system_instruction", None) or (
+            config.get("system_instruction") if isinstance(config, dict) else None)
+        if si:
+            system = si if isinstance(si, str) else str(si)
+        t = getattr(config, "temperature", None) if not isinstance(config, dict) \
+            else config.get("temperature")
+        if t is not None:
+            temperature = float(t)
+
+    items = contents if isinstance(contents, (list, tuple)) else [contents]
+    messages: list[dict] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": parts_to_openai(list(items))})
+    return messages, temperature
+
+
+def _provider_call(model: str, contents, config, timeout_ms: int):
+    """One generation through a configured provider. Raises like every other
+    rung, so the loop's error classification applies to it unchanged."""
+    from memory.config_manager import get_provider_config
+    from providers import registry
+
+    pid = model[len(PROVIDER_PREFIX):]
+    cfg = get_provider_config(pid)
+    missing = registry.missing_fields(pid, cfg)
+    if missing:
+        raise RuntimeError(f"404 not configured: {', '.join(missing)}")
+
+    llm = registry.build(pid, cfg)
+    messages, temperature = _to_openai_messages(contents, config)
+    text_out, _calls = llm.complete(
+        messages, tools=None,
+        timeout=max(MIN_TIMEOUT_MS, int(timeout_ms)) / 1000.0,
+        temperature=temperature)
+    if not (text_out or "").strip():
+        raise RuntimeError("the provider returned an empty answer")
+    return _Reply(text_out)
+
+
 def call(contents, tier: str = FAST, config=None,
-         timeout_ms: int = DEFAULT_TIMEOUT_MS, key: str = ""):
+         timeout_ms: int = DEFAULT_TIMEOUT_MS, key: str = "",
+         provider: str = ""):
     """Run one generation, walking the ladder until one answers.
 
     Returns the SDK's own response object, so callers that need more than the
@@ -483,20 +731,59 @@ def call(contents, tier: str = FAST, config=None,
     if ladder is None:
         ladder = (tier,) + tuple(m for m in _LADDERS[SMART] if m != tier)
 
+    # A configured provider joins the ladder — behind Gemini by default, in
+    # front of it when the user has asked for that. One config read; on an
+    # install with no provider this is an empty tuple and nothing changes.
+    rungs = _provider_rungs(tier)
+    if rungs:
+        ladder = (rungs + tuple(ladder)) if _provider_first() \
+            else (tuple(ladder) + rungs)
+
+    # A service the caller chose for THIS job — dev_agent's coding model — goes
+    # in front of everything, because somebody picked it on purpose. The rest
+    # of the ladder stays behind it, so a service that is down still ends in an
+    # answer rather than in nothing.
+    if provider:
+        chosen = PROVIDER_PREFIX + provider
+        rungs = (chosen,) + tuple(r for r in rungs if r != chosen)
+        ladder = (chosen,) + tuple(m for m in ladder if m != chosen)
+
     resolved_key = key or api_key()
     if not resolved_key:
-        print("[Gemini] no Gemini API key is configured")
-        return None
+        # A provider does not need a Gemini key. Before this, a missing key
+        # meant every one-shot call in the app failed — which is exactly the
+        # situation somebody configuring another provider is trying to leave.
+        if not rungs:
+            print("[Gemini] no Gemini API key is configured")
+            return None
+        ladder = rungs
+
+    # A recording can only be read by the REST models. Dropping the two rungs
+    # that cannot take one is not a fallback — it is declining to make a request
+    # whose answer is already known, and it is why nothing has to be cooled down
+    # afterwards. Text and images are untouched by this: `_carries_recording`
+    # returns False for every call site that existed before it.
+    if _carries_recording(contents):
+        ladder = tuple(m for m in ladder
+                       if m != LIVE and not m.startswith(PROVIDER_PREFIX))
+        if not ladder:
+            print("[Gemini] nothing on this ladder can read a recording")
+            return None
 
     cl = None
-    tried = [m for m in ladder if not _cooling(m)] or list(ladder)
+    tried = usable_rungs(ladder)
+    key_refused = False
     for model in tried:
+        if key_refused and not model.startswith(PROVIDER_PREFIX):
+            continue                     # same key, same answer — a provider does not use it
         try:
             if model == LIVE:
                 reply = _live_call(contents, config, timeout_ms, resolved_key)
                 if reply is not None:
                     return reply
                 raise RuntimeError("the Live turn came back empty")
+            if model.startswith(PROVIDER_PREFIX):
+                return _provider_call(model, contents, config, timeout_ms)
             if cl is None:
                 cl = client(timeout_ms=timeout_ms, key=resolved_key)
             kwargs = {"model": model, "contents": contents}
@@ -505,7 +792,10 @@ def call(contents, tier: str = FAST, config=None,
             return cl.models.generate_content(**kwargs)
         except Exception as e:
             msg = str(e)
-            if is_quota_error(msg):
+            if is_key_error(msg) and not model.startswith(PROVIDER_PREFIX):
+                key_refused = True
+                print(f"[Gemini] the API key was refused — {msg[:120]}")
+            elif is_quota_error(msg):
                 _cool(model)
                 print(f"[Gemini] {model}: out of quota — skipping it for "
                       f"{_COOLDOWN_SECONDS // 60} minutes")
@@ -533,17 +823,52 @@ def text(contents, tier: str = FAST, config=None,
 
 def as_json(contents, tier: str = FAST, config=None,
             timeout_ms: int = DEFAULT_TIMEOUT_MS, key: str = "", default=None):
-    """`text`, parsed as JSON, tolerating the fences and prose a model wraps it
-    in. `default` when nothing answered or the answer would not parse."""
+    """`text`, parsed as JSON, tolerating the fences, reasoning and prose a
+    model wraps it in. `default` when nothing answered or the answer would not
+    parse. See parse_json."""
     raw = text(contents, tier=tier, config=config, timeout_ms=timeout_ms, key=key)
     if not raw:
         return default
-    if "{" in raw and "}" in raw:
-        raw = raw[raw.find("{"): raw.rfind("}") + 1]
-    elif "[" in raw and "]" in raw:
-        raw = raw[raw.find("["): raw.rfind("]") + 1]
-    try:
-        return json.loads(raw)
-    except Exception as e:
-        print(f"[Gemini] reply was not JSON: {e}")
+    value = parse_json(raw, default=_MISSING)
+    if value is _MISSING:
+        print(f"[Gemini] reply was not JSON: {raw[:160]!r}")
         return default
+    return value
+
+
+_MISSING = object()
+_THINK_RE = re.compile(r"(?is)<think(?:ing)?>.*?</think(?:ing)?>")
+_FENCE_RE = re.compile(r"```(?:json|JSON)?\s*(.*?)```", re.S)
+
+
+def parse_json(raw: str, default=None):
+    """The JSON value in a model's reply, wherever it sits in the text.
+
+    The first version cut from the first "{" to the last "}". For a LIST of
+    objects — `[{...}, {...}]`, which is what a quiz, a set of steps or any
+    batch of results is — that cut keeps `{...}, {...}`: not JSON, and every
+    such reply failed with "Extra data". So did an object followed by a
+    sentence that contained a brace.
+
+    Now: reasoning blocks and code fences are removed, and the text is read
+    with a real JSON decoder from each "[" or "{" in turn; the first complete
+    value wins, and whatever follows it is ignored."""
+    if not raw:
+        return default
+    body = _THINK_RE.sub("", raw)
+    candidates = [m.group(1) for m in _FENCE_RE.finditer(body)] + [body]
+    decoder = json.JSONDecoder()
+    for cand in candidates:
+        tried = 0
+        for i, ch in enumerate(cand):
+            if ch not in "[{":
+                continue
+            try:
+                value, _end = decoder.raw_decode(cand, i)
+            except ValueError:
+                tried += 1
+                if tried > 200:          # a reply that is mostly braces
+                    break
+                continue
+            return value
+    return default

@@ -266,7 +266,7 @@ class FraDevToolingTests(unittest.TestCase):
         planner.assert_not_called()
 
     def test_dev_agent_project_path_rejects_generated_path_escape(self):
-        from actions.dev_agent import dev_agent
+        from actions.dev_agent import _job_lock, dev_agent
 
         self.write_config()
         plan = {
@@ -286,6 +286,11 @@ class FraDevToolingTests(unittest.TestCase):
             patch("actions.dev_agent._get_model", return_value=model),
             patch("actions.dev_agent._open_vscode", return_value=False),
             patch("actions.dev_agent._run_project", return_value=""),
+            # Builds run on a background thread upstream; run the job inline here.
+            patch(
+                "actions.dev_agent._run_job",
+                side_effect=lambda job, *a, **k: (_job_lock.release(), job())[1],
+            ),
         ):
             result = dev_agent(
                 {

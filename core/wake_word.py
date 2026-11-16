@@ -81,7 +81,7 @@ def install_and_download(logger: Callable[[str], None] = print,
             _tell("Wake word: installing openwakeword (one-time)…")
             r = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "openwakeword"],
-                capture_output=True, text=True,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             if r.returncode != 0:
                 tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or [""]
@@ -128,6 +128,7 @@ class WakeWordDetector:
         self._running = False
         self._model = None
         self._ready = False
+        self._reset_pending = False
 
     def start(self) -> bool:
         """Load the model and spawn the inference thread. Returns True on success.
@@ -163,6 +164,22 @@ class WakeWordDetector:
     def ready(self) -> bool:
         return self._ready
 
+    def reset(self) -> None:
+        """Forget what was heard so far — call it when the assistant goes to sleep.
+        Done on the detector's own thread, which is the only one that touches
+        the model."""
+        self._reset_pending = True
+
+    def _reset_model(self) -> None:
+        # The model keeps its recent audio features and scores. Left alone, one
+        # "Hey Jarvis" fired a dozen times in a row (measured: 12), and audio
+        # from before the assistant woke was still in there when it went back
+        # to sleep — so it could wake again on words said minutes earlier.
+        try:
+            self._model.reset()
+        except Exception:
+            pass
+
     def feed(self, frame_int16) -> None:
         """Called from the mic callback (real-time thread). Must stay cheap and
         never block — the frame is copied and dropped if the queue is backed up."""
@@ -184,6 +201,9 @@ class WakeWordDetector:
                 frame = self._queue.get()
                 if frame is None or not self._running:
                     break
+                if self._reset_pending:
+                    self._reset_pending = False
+                    self._reset_model()
                 scores = self._model.predict(np.asarray(frame, dtype=np.int16))
                 score = 0.0
                 if isinstance(scores, dict):
@@ -194,8 +214,9 @@ class WakeWordDetector:
                     if score == 0.0 and scores:
                         score = max(float(v) for v in scores.values())
                 if score >= self._threshold:
-                    # drain any backlog so we don't double-fire on the same utterance
+                    # drain any backlog and clear the model, so one utterance is one wake
                     self._drain()
+                    self._reset_model()
                     try:
                         self._on_detect()
                     except Exception as e:
