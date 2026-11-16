@@ -107,6 +107,9 @@ class AccessPolicyTests(unittest.TestCase):
         # keyword anywhere, so a path split across parameters is still caught
         self.assertTrue(policy.blocked_reason({"path": "~/work", "name": "secret-co"}))
         self.assertTrue(policy.blocked_reason({"path": f"file://{blocked}/a.py"}))
+        self.assertTrue(policy.blocked_reason({"path": "/x/%73ecret-co/a.py"}))
+        self.assertTrue(policy.blocked_reason({"path": str(blocked).upper()}))
+        self.assertTrue(policy.blocked_reason({"path": str(blocked.parent), "name": "SECRET-CO"}))
         self.assertEqual(policy.blocked_reason({"query": "public integrations"}), "")
         self.assertEqual(policy.blocked_reason({"path": str(self.root / "lab")}), "")
 

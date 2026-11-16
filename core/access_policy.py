@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 
 PERMISSIONS = frozenset({"read", "write", "test", "commit", "remote"})
@@ -130,10 +132,15 @@ class AccessPolicy:
         ~/Desktop, under ~)."""
         if "" in self._blocked_keywords:
             return f"Access blocked: {self._config_error}"
-        for value in _strings(parameters):
-            if any(k in value.lower() for k in self._blocked_keywords):
+        values = [_normalise(v) for v in _strings(parameters)]
+        # Handlers join folder + name; check every pair joined the same way.
+        candidates = values + [f"{a.rstrip('/')}/{b}" for a in values for b in values if a != b]
+        roots = tuple(str(r).casefold() for r in self._blocked_paths)
+        for value in candidates:
+            low = value.casefold()
+            if any(k in low for k in self._blocked_keywords):
                 return f"Access blocked: '{value}' names a restricted area"
-            if self._blocked_paths and _resolves_into(value, self._blocked_paths):
+            if roots and _resolves_into(value, roots):
                 return f"Access blocked: '{value}' is in a restricted area"
         return ""
 
@@ -181,19 +188,26 @@ def _strings(value: Any):
             yield from _strings(item)
 
 
-def _resolves_into(value: str, roots: tuple[Path, ...]) -> bool:
-    raw = value.strip().strip("'\"")
-    if raw.lower().startswith("file://"):
-        raw = raw[7:]
-    if not raw:
+def _normalise(value: str) -> str:
+    """Decode the forms a handler may decode (file:// URI, %xx, Unicode
+    composition) so the check sees the same text the handler will open."""
+    raw = unicodedata.normalize("NFC", unquote(value.strip().strip("'\"")))
+    if raw.casefold().startswith("file:"):
+        raw = unquote(urlparse(raw).path)
+    return raw
+
+
+def _resolves_into(value: str, roots: tuple[str, ...]) -> bool:
+    """Compared casefolded: the macOS and Windows file systems ignore case."""
+    if not value:
         return False
     home = Path.home()
-    for cand in (Path(raw).expanduser(), home / "Desktop" / raw, home / raw):
+    for cand in (Path(value).expanduser(), home / "Desktop" / value, home / value):
         try:
-            resolved = cand.resolve(strict=False)
+            resolved = str(cand.resolve(strict=False)).casefold()
         except (OSError, ValueError):
             continue
-        if any(_is_relative_to(resolved, root) for root in roots):
+        if any(resolved == r or resolved.startswith(r.rstrip("/") + "/") for r in roots):
             return True
     return False
 
