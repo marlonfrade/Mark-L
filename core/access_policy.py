@@ -42,9 +42,13 @@ class AccessPolicy:
         self,
         projects: tuple[_ProjectGrant, ...] = (),
         config_error: str | None = None,
+        blocked_paths: tuple[Path, ...] = (),
+        blocked_keywords: tuple[str, ...] = (),
     ):
         self._projects = projects
         self._config_error = config_error
+        self._blocked_paths = blocked_paths
+        self._blocked_keywords = blocked_keywords
 
     @classmethod
     def load(cls, config_path: str | Path = DEFAULT_CONFIG_PATH) -> "AccessPolicy":
@@ -61,7 +65,19 @@ class AccessPolicy:
             projects: list[_ProjectGrant] = []
             for index, item in enumerate(projects_data):
                 projects.append(_parse_project(item, index))
-            return cls(tuple(projects))
+            blocked = data.get("blocked", {})
+            if not isinstance(blocked, dict):
+                raise ValueError("'blocked' must be an object")
+            return cls(
+                tuple(projects),
+                blocked_paths=tuple(
+                    Path(str(p)).expanduser().resolve(strict=False)
+                    for p in blocked.get("paths", [])
+                ),
+                blocked_keywords=tuple(
+                    str(k).lower() for k in blocked.get("keywords", []) if str(k).strip()
+                ),
+            )
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
             return cls(config_error=f"Invalid FraDev config {path}: {exc}")
 
@@ -101,6 +117,28 @@ class AccessPolicy:
         )
         return AccessDecision(allowed, permission, requested, project.path, reason)
 
+    def blocked_reason(self, parameters: Any) -> str:
+        """Why these tool parameters touch a blocked area, or ''.
+
+        Checked for every tool call, because general tools (file reading,
+        folder jobs) do not consult project grants. A path-like string is
+        blocked when it resolves inside a blocked path or names a blocked
+        keyword; plain text such as a search query is left alone."""
+        for value in _strings(parameters):
+            if "/" not in value and "\\" not in value:
+                continue
+            low = value.lower()
+            hit = next((k for k in self._blocked_keywords if k in low), None)
+            if hit is None:
+                try:
+                    resolved = Path(value.strip()).expanduser().resolve(strict=False)
+                except (OSError, ValueError):
+                    continue
+                if not any(_is_relative_to(resolved, b) for b in self._blocked_paths):
+                    continue
+            return f"Access blocked: {value} is in a restricted area"
+        return ""
+
     def is_allowed(self, path: str | Path, permission: str) -> bool:
         return self.check(path, permission).allowed
 
@@ -132,6 +170,17 @@ def _parse_project(item: Any, index: int) -> _ProjectGrant:
         Path(raw_path).expanduser().resolve(strict=False),
         permissions,
     )
+
+
+def _strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _strings(item)
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:

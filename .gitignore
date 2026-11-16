@@ -57,3 +57,7 @@ logs/
 downloads/
 uploads/
 screenshots/
+
+# local secrets / FraDev access config
+config/api_keys.json
+config/fradev.local.json

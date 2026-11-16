@@ -30,5 +30,13 @@
         "remote": false
       }
     }
-  ]
+  ],
+  "blocked": {
+    "paths": [
+      "/absolute/path/to/a/restricted/project"
+    ],
+    "keywords": [
+      "restricted-name"
+    ]
+  }
 }
