@@ -107,6 +107,17 @@ class AccessPolicyTests(unittest.TestCase):
         self.assertEqual(policy.blocked_reason({"query": "secret integrations"}), "")
         self.assertEqual(policy.blocked_reason({"path": str(self.root / "lab")}), "")
 
+    def test_invalid_config_blocks_everything(self):
+        self.config_path.write_text("{not json", encoding="utf-8")
+        policy = AccessPolicy.load(self.config_path)
+
+        self.assertTrue(policy.blocked_reason({"query": "anything"}))
+
+    def test_missing_config_blocks_nothing(self):
+        policy = AccessPolicy.load(self.config_path)
+
+        self.assertEqual(policy.blocked_reason({"path": "/tmp/x"}), "")
+
     def test_registry_refuses_blocked_parameters(self):
         from core.action_loader import ActionRecord, ActionRegistry
 

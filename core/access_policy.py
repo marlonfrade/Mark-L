@@ -79,7 +79,9 @@ class AccessPolicy:
                 ),
             )
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
-            return cls(config_error=f"Invalid FraDev config {path}: {exc}")
+            # Fail closed: a broken config must not silently lift the blocks.
+            return cls(config_error=f"Invalid FraDev config {path}: {exc}",
+                       blocked_keywords=("",))
 
     def check(self, path: str | Path, permission: str) -> AccessDecision:
         requested = Path(path).expanduser().resolve(strict=False)
@@ -124,6 +126,8 @@ class AccessPolicy:
         folder jobs) do not consult project grants. A path-like string is
         blocked when it resolves inside a blocked path or names a blocked
         keyword; plain text such as a search query is left alone."""
+        if "" in self._blocked_keywords:
+            return f"Access blocked: {self._config_error}"
         for value in _strings(parameters):
             if "/" not in value and "\\" not in value:
                 continue
